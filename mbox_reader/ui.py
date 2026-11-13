@@ -38,7 +38,6 @@ class UiMixin:
         ent.bind('<Return>',lambda _:self.refresh(reset=True))
         ttk.Button(top,text='Search',command=lambda:self.refresh(reset=True)).pack(side='left')
         ttk.Button(top,text='Clear',command=lambda:(self.search.set(''),self.refresh(reset=True))).pack(side='left',padx=5)
-        ttk.Button(top,text='Attachments',command=self.show_attachment_library).pack(side='left',padx=4)
         ttk.Button(top,text='Index content',command=self.start_enrichment).pack(side='left',padx=4)
         ttk.Button(top,text='Export selected EMLs',command=self.save_selected_emls).pack(side='left',padx=4)
         filters=ttk.Frame(self,padding=(12,0,12,8));filters.pack(fill='x')
@@ -70,9 +69,7 @@ class UiMixin:
         ).pack(side='left',padx=(0,6))
         for entry in (sender,recipient,start,end):
             entry.bind('<Return>',lambda event:self.refresh(reset=True))
-        ttk.Checkbutton(filters,text='Attachments only',
-                        variable=self.attachments_only,
-                        command=lambda:self.refresh(reset=True)).pack(side='left',padx=5)
+        ttk.Button(filters,text='Attachments',command=self.show_attachment_library).pack(side='left',padx=5)
         ttk.Button(filters,text='Apply',command=lambda:self.refresh(reset=True)).pack(side='left')
         ttk.Button(filters,text='Clear filters',command=self.clear_filters).pack(side='left',padx=5)
         main=ttk.Frame(self); main.pack(fill='both',expand=True,padx=12,pady=(0,8))
@@ -139,7 +136,6 @@ class UiMixin:
         self.recipient_filter.set('')
         self.start_date_filter.set('')
         self.end_date_filter.set('')
-        self.attachments_only.set(False)
         self.refresh(reset=True)
 
     def schedule_address_suggestions(self, field):
@@ -485,6 +481,7 @@ class UiMixin:
                     quote_ref[0]=ttk.Button(actions,command=toggle_quote)
                     quote_ref[0].pack(side='left',padx=8)
                 render()
+                self.show_inline_images(card,msg)
         self.thread_canvas.yview_moveto(0)
 
     def destroy(self):
