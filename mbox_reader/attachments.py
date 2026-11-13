@@ -38,8 +38,10 @@ class AttachmentsMixin:
             self.attachment_window.lift();return
         win=tk.Toplevel(self);win.title('Attachment library');win.geometry('850x550')
         self.attachment_window=win
+        self.library_use_filters=tk.BooleanVar(value=False)
         top=ttk.Frame(win,padding=8);top.pack(fill='x')
         ttk.Label(top,text='Attachments found by content indexing').pack(side='left')
+        ttk.Checkbutton(top,text='Use email filters',variable=self.library_use_filters,command=self.populate_attachments).pack(side='left',padx=12)
         ttk.Button(top,text='Refresh',command=self.populate_attachments).pack(side='right')
         ttk.Button(top,text='Save selected',command=self.export_library_attachments).pack(side='right',padx=5)
         self.attachment_tree=ttk.Treeview(win,columns=('name','type','size','sender'),show='headings',selectmode='extended')
@@ -51,7 +53,45 @@ class AttachmentsMixin:
     def populate_attachments(self):
         if not self.conn or not self.attachment_window or not self.attachment_window.winfo_exists():return
         tree=self.attachment_tree;tree.delete(*tree.get_children())
-        rows=self.conn.execute('SELECT a.start,a.part_number,a.filename,a.mime,a.size,m.sender FROM attachments a JOIN messages m ON m.start=a.start ORDER BY m.id DESC LIMIT 2000').fetchall()
+        # Apply the same sender, recipient, date, and keyword filters to the
+        # attachment library when requested. A message can have multiple files.
+        conditions=[]
+        args=[]
+        if self.library_use_filters.get():
+            sender=self.sender_filter.get().strip()
+            recipient=self.recipient_filter.get().strip()
+            start=self.start_date_filter.get().strip()
+            end=self.end_date_filter.get().strip()
+            if sender:conditions.append('m.sender LIKE ?');args.append('%'+sender+'%')
+            if recipient:conditions.append('m.recipient LIKE ?');args.append('%'+recipient+'%')
+            if start:conditions.append('m.date >= ?');args.append(start)
+            if end:
+                from datetime import date,timedelta
+                try:
+                    exclusive=(date.fromisoformat(end)+timedelta(days=1)).isoformat()
+                except ValueError:
+                    messagebox.showwarning('Invalid date','Use YYYY-MM-DD for the end date.')
+                    return
+                conditions.append('m.date < ?');args.append(exclusive)
+            for token in re.findall(r'"[^"]*"|\\S+',self.search.get().strip()):
+                token=token.strip('"')
+                if not token:continue
+                if token.lower()=='has:attachment':continue
+                if token.lower().startswith('from:'):
+                    conditions.append('m.sender LIKE ?');args.append('%'+token[5:]+'%')
+                elif token.lower().startswith('to:'):
+                    conditions.append('m.recipient LIKE ?');args.append('%'+token[3:]+'%')
+                elif token.lower().startswith('subject:'):
+                    conditions.append('m.subject LIKE ?');args.append('%'+token[8:]+'%')
+                else:
+                    conditions.append('(m.subject LIKE ? OR m.sender LIKE ? OR m.recipient LIKE ?)')
+                    args.extend(['%'+token+'%']*3)
+        where=' WHERE '+' AND '.join(conditions) if conditions else ''
+        rows=self.conn.execute(
+            'SELECT a.start,a.part_number,a.filename,a.mime,a.size,m.sender '
+            'FROM attachments a JOIN messages m ON m.start=a.start'
+            +where+' ORDER BY m.id DESC LIMIT 2000',args
+        ).fetchall()
         self.attachment_rows=rows
         for i,row in enumerate(rows):tree.insert('','end',iid=str(i),values=(row[2],row[3],f'{row[4]/1024:.1f} KB',row[5]))
 
