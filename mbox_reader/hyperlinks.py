@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 from .core import part_text
 
-URLS=re.compile(r"(?i)https?://[^\\s<>\\\"]+|mailto:[^\\s<>\\\"]+|(?<![\\w@])[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}")
+URLS = re.compile(r'https?://[^\s<>]+|mailto:[^\s<>]+|(?<![\w@])[\w.+-]+@[\w.-]+\.[a-z]{2,}', re.I)
 
 def safe_url(raw):
     """Only permit browser and mail links, not executable URL schemes."""
