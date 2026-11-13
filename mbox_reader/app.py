@@ -30,6 +30,7 @@ class Reader(UiMixin, ArchivesMixin, ConversationsMixin, ExportsMixin, Attachmen
         self.recipient_filter=tk.StringVar()
         self.start_date_filter=tk.StringVar()
         self.end_date_filter=tk.StringVar()
+        self.attachments_only=tk.BooleanVar(value=False)
         self.status=tk.StringVar(value='Open an MBOX archive. Your emails stay on this computer.')
         self.archives=load_library(); self.enriching=False; self.attachment_window=None
         # A single worker prevents concurrent expensive searches.
