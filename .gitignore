@@ -1,0 +1,37 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# Private email archives and attachments
+*.mbox
+*.mbx
+*.eml
+*.pst
+*.ost
+*.pdf
+
+# Application databases and local settings
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.json
+*.jsonl
+*.log
+
+# Local secrets and environment variables
+.env
+.env.*
+*.key
+
+# Editor and operating system files
+.vscode/
+.DS_Store
+Thumbs.db
