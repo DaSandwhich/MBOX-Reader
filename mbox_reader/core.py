@@ -117,9 +117,9 @@ def index_archive(path, db, events, generation):
                         header=bytearray()
                         while len(header)<262144:
                             line=source.readline()
-                            if not line or line in (b'\\n',b'\\r\\n'):break
+                            if not line or line in (b'\n',b'\r\n'):break
                             header.extend(line)
-                        m=BytesHeaderParser(policy=policy.default).parsebytes(bytes(header)+b'\\n')
+                        m=BytesHeaderParser(policy=policy.default).parsebytes(bytes(header)+b'\n')
                         c.execute('UPDATE messages SET recipient=? WHERE id=?',(decoded(m.get('To','')),mid))
                         if i%500==0:
                             c.commit()
