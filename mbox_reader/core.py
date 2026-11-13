@@ -87,7 +87,7 @@ def cache_path(path):
 def connect(db):
     c=sqlite3.connect(str(db), timeout=20)
     c.execute('PRAGMA journal_mode=WAL')
-    c.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, start INTEGER NOT NULL, stop INTEGER NOT NULL, date TEXT, sender TEXT, subject TEXT, recipient TEXT DEFAULT '')')
+    c.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, start INTEGER NOT NULL, stop INTEGER NOT NULL, date TEXT, sender TEXT, subject TEXT, recipient TEXT DEFAULT '')")
     if 'recipient' not in {x[1] for x in c.execute('PRAGMA table_info(messages)')}:
         c.execute("ALTER TABLE messages ADD COLUMN recipient TEXT DEFAULT ''")
     c.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)')
