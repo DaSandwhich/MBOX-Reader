@@ -121,49 +121,151 @@ class UiMixin:
         self.star_btn.configure(text='★ Unstar' if new else '☆ Star')
         self.refresh()
 
-    def refresh(self,reset=False):
-        if reset:self.offset=0
-        if not self.conn:return
+    def refresh(self, reset=False):
+        """Schedule a search without blocking Tkinter's event loop.
+
+        A short debounce combines rapid folder/search changes. The worker uses
+        its own SQLite connection; Tk widgets are updated only by poll().
+        """
+        if reset:
+            self.offset = 0
+        if not self.db or not self.conn:
+            return
+
+        self.search_request += 1
+        request_id = self.search_request
+        if self.search_timer is not None:
+            self.after_cancel(self.search_timer)
+        self.status.set("Searching messages…")
+        self.search_timer = self.after(
+            120, lambda: self._queue_search(request_id)
+        )
+
+    def _queue_search(self, request_id):
+        """Queue only the newest requested search for the background worker."""
+        self.search_timer = None
+        if request_id != self.search_request or not self.db:
+            return
+        request = (
+            self.generation, request_id, str(self.db),
+            self.search.get().strip(), self.folder, self.offset
+        )
+        # Queue size one: replace obsolete pending searches with the newest.
         try:
-            q=self.search.get().strip();conditions=[];args=[]
-            for token in re.findall(r'"[^"]*"|\S+',q):
-                token=token.strip('"')
-                if ':' in token:
-                    field,value=token.split(':',1);field=field.lower()
-                    if field in ('from','to','subject','after','before','label','type') and value:
-                        if field=='from':conditions.append('m.sender LIKE ?');args.append('%'+value+'%')
-                        elif field=='subject':conditions.append('m.subject LIKE ?');args.append('%'+value+'%')
-                        elif field=='to':conditions.append('EXISTS (SELECT 1 FROM extra e WHERE e.start=m.start AND e.recipient LIKE ?)');args.append('%'+value+'%')
-                        elif field=='after':conditions.append('m.date >= ?');args.append(value)
-                        elif field=='before':conditions.append('m.date < ?');args.append(value)
-                        elif field=='label':conditions.append('EXISTS (SELECT 1 FROM message_labels ml WHERE ml.start=m.start AND ml.label=?)');args.append(value)
-                        elif field=='type':conditions.append('EXISTS (SELECT 1 FROM attachments a WHERE a.start=m.start AND (a.mime LIKE ? OR a.filename LIKE ?))');args.extend(['%'+value+'%','%'+value+'%'])
-                        continue
-                if token.lower()=='has:attachment':
-                    conditions.append('EXISTS (SELECT 1 FROM attachments a WHERE a.start=m.start)');continue
-                if token.lower()=='is:duplicate':
-                    conditions.append('EXISTS (SELECT 1 FROM extra e WHERE e.start=m.start AND e.duplicate=1)');continue
-                conditions.append('('+' OR '.join(['m.date LIKE ?','m.sender LIKE ?','m.subject LIKE ?',
-                    'EXISTS (SELECT 1 FROM body_fts bf WHERE bf.start=m.start AND bf.body LIKE ?)'])+')')
-                args.extend(['%'+token+'%']*4)
-            if self.folder.startswith('Label: '):
-                conditions.append('EXISTS (SELECT 1 FROM message_labels ml WHERE ml.start=m.start AND ml.label=?)')
-                args.append(self.folder[7:])
-            if self.folder=='Starred':conditions.append('COALESCE(f.starred,0)=1')
-            if self.folder=='Unread':conditions.append('COALESCE(f.read,0)=0')
-            base=' FROM messages m LEFT JOIN flags f ON f.start=m.start'
-            where=' WHERE '+' AND '.join(conditions) if conditions else ''
-            total=self.conn.execute('SELECT COUNT(*)'+base+where,args).fetchone()[0]
-            if self.offset>=total:self.offset=max(0,((total-1)//PAGE_SIZE)*PAGE_SIZE)
-            rows=self.conn.execute('SELECT m.id,m.date,m.sender,m.subject,COALESCE(f.starred,0),COALESCE(f.read,0)'+base+where+' ORDER BY m.id DESC LIMIT ? OFFSET ?',args+[PAGE_SIZE,self.offset]).fetchall()
-            self.tree.delete(*self.tree.get_children())
-            self.bulk_btn.configure(state='disabled')
-            for mid,date,sender,subject,starred,read in rows:
-                self.tree.insert('','end',iid=str(mid),values=('★' if starred else '☆',sender,('● ' if not read else '')+subject,date))
-            self.page_label.configure(text=f'{self.offset+1 if total else 0:,}–{min(self.offset+PAGE_SIZE,total):,} / {total:,}')
-            self.prev.configure(state='normal' if self.offset else 'disabled')
-            self.next.configure(state='normal' if self.offset+PAGE_SIZE<total else 'disabled')
-        except sqlite3.Error as exc:self.status.set(f'Database busy: {exc}')
+            self.search_jobs.put_nowait(request)
+        except queue.Full:
+            try:
+                self.search_jobs.get_nowait()
+            except queue.Empty:
+                pass
+            self.search_jobs.put_nowait(request)
+
+    @staticmethod
+    def _search_rows(db, query, folder, offset):
+        """Query a single page using a connection owned by the worker thread."""
+        conditions = []
+        args = []
+        for token in re.findall(r'"[^"]*"|\\S+', query):
+            token = token.strip('"')
+            if ':' in token:
+                field, value = token.split(':', 1)
+                field = field.lower()
+                if field in ('from', 'to', 'subject', 'after', 'before', 'label', 'type') and value:
+                    if field == 'from':
+                        conditions.append('m.sender LIKE ?')
+                        args.append('%' + value + '%')
+                    elif field == 'subject':
+                        conditions.append('m.subject LIKE ?')
+                        args.append('%' + value + '%')
+                    elif field == 'to':
+                        conditions.append('EXISTS (SELECT 1 FROM extra e WHERE e.start=m.start AND e.recipient LIKE ?)')
+                        args.append('%' + value + '%')
+                    elif field == 'after':
+                        conditions.append('m.date >= ?')
+                        args.append(value)
+                    elif field == 'before':
+                        conditions.append('m.date < ?')
+                        args.append(value)
+                    elif field == 'label':
+                        conditions.append('EXISTS (SELECT 1 FROM message_labels ml WHERE ml.start=m.start AND ml.label=?)')
+                        args.append(value)
+                    elif field == 'type':
+                        conditions.append('EXISTS (SELECT 1 FROM attachments a WHERE a.start=m.start AND (a.mime LIKE ? OR a.filename LIKE ?))')
+                        args.extend(['%' + value + '%', '%' + value + '%'])
+                    continue
+            if token.lower() == 'has:attachment':
+                conditions.append('EXISTS (SELECT 1 FROM attachments a WHERE a.start=m.start)')
+                continue
+            if token.lower() == 'is:duplicate':
+                conditions.append('EXISTS (SELECT 1 FROM extra e WHERE e.start=m.start AND e.duplicate=1)')
+                continue
+            conditions.append('(' + ' OR '.join([
+                'm.date LIKE ?', 'm.sender LIKE ?', 'm.subject LIKE ?',
+                'EXISTS (SELECT 1 FROM body_fts bf WHERE bf.start=m.start AND bf.body LIKE ?)'
+            ]) + ')')
+            args.extend(['%' + token + '%'] * 4)
+        if folder.startswith('Label: '):
+            conditions.append('EXISTS (SELECT 1 FROM message_labels ml WHERE ml.start=m.start AND ml.label=?)')
+            args.append(folder[7:])
+        if folder == 'Starred':
+            conditions.append('COALESCE(f.starred,0)=1')
+        if folder == 'Unread':
+            conditions.append('COALESCE(f.read,0)=0')
+
+        base = ' FROM messages m LEFT JOIN flags f ON f.start=m.start'
+        where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+        # Read-only connections avoid schema initialization and UI-thread writes.
+        connection = sqlite3.connect(
+            Path(db).resolve().as_uri() + '?mode=ro', uri=True, timeout=5
+        )
+        try:
+            total = connection.execute(
+                'SELECT COUNT(*)' + base + where, args
+            ).fetchone()[0]
+            if offset >= total:
+                offset = max(0, ((total - 1) // PAGE_SIZE) * PAGE_SIZE)
+            rows = connection.execute(
+                'SELECT m.id,m.date,m.sender,m.subject,'
+                'COALESCE(f.starred,0),COALESCE(f.read,0)'
+                + base + where + ' ORDER BY m.id DESC LIMIT ? OFFSET ?',
+                args + [PAGE_SIZE, offset]
+            ).fetchall()
+            return offset, total, rows
+        finally:
+            connection.close()
+
+    def _search_worker(self):
+        """Execute database searches away from the Tkinter main thread."""
+        while True:
+            generation, request_id, db, query, folder, offset = self.search_jobs.get()
+            try:
+                result = self._search_rows(db, query, folder, offset)
+                self.events.put(('search_result', generation, (request_id, result)))
+            except sqlite3.Error as exc:
+                self.events.put(('search_error', generation, (request_id, str(exc))))
+            except Exception as exc:
+                self.events.put(('search_error', generation, (request_id, str(exc))))
+
+    def _display_search_results(self, result):
+        """Render completed search results on the Tkinter thread only."""
+        offset, total, rows = result
+        self.offset = offset
+        self.tree.delete(*self.tree.get_children())
+        self.bulk_btn.configure(state='disabled')
+        for mid, date, sender, subject, starred, read in rows:
+            self.tree.insert(
+                '', 'end', iid=str(mid),
+                values=('★' if starred else '☆', sender,
+                        ('● ' if not read else '') + subject, date)
+            )
+        self.page_label.configure(
+            text=f'{offset + 1 if total else 0:,}–{min(offset + PAGE_SIZE, total):,} / {total:,}'
+        )
+        self.prev.configure(state='normal' if offset else 'disabled')
+        self.next.configure(
+            state='normal' if offset + PAGE_SIZE < total else 'disabled'
+        )
+        self.status.set(f'{total:,} matching messages.')
 
     def change_page(self,delta):self.offset=max(0,self.offset+delta*PAGE_SIZE);self.refresh()
 

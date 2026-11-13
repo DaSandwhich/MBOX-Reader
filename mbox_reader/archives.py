@@ -33,6 +33,7 @@ class ArchivesMixin:
         self.archives=[x for x in self.archives if x!=path]
         save_library(self.archives)
         self.generation+=1
+        self.search_request += 1  # Ignore results from the previous archive.
         if self.conn:self.conn.close();self.conn=None
         self.path=None;self.db=None;self.current=None
         self.tree.delete(*self.tree.get_children())
@@ -56,6 +57,7 @@ class ArchivesMixin:
         self.archives.insert(0,path)
         save_library(self.archives)
         self.generation+=1; gen=self.generation
+        self.search_request += 1  # Invalidate pending search results.
         if self.conn:self.conn.close();self.conn=None
         self.path=path; self.db=cache_path(path); self.offset=0; self.current=None
         self.update_archive_choices()
@@ -79,6 +81,14 @@ class ArchivesMixin:
                     self.conn=connect(self.db); self.bar['value']=100; self.open_btn.configure(state='normal')
                     self.load_labels(); self.refresh(); n=self.conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
                     self.status.set(f'{n:,} messages indexed. '+('Loaded saved index instantly.' if data else 'Index saved for faster reopening.'))
+                elif kind=='search_result':
+                    request_id, result = data
+                    if request_id == self.search_request:
+                        self._display_search_results(result)
+                elif kind=='search_error':
+                    request_id, error = data
+                    if request_id == self.search_request:
+                        self.status.set('Search failed: ' + error)
                 elif kind=='enrich_progress':
                     done,total=data; self.status.set(f'Indexing content, attachments and reply links: {done:,}/{total:,} emails')
                 elif kind=='enrich_done':

@@ -27,6 +27,11 @@ class Reader(UiMixin, ArchivesMixin, ConversationsMixin, ExportsMixin, Attachmen
         self.path=None; self.db=None; self.conn=None; self.events=queue.Queue(); self.generation=0
         self.offset=0; self.current=None; self.bulk_running=False; self.folder='All Mail'; self.search=tk.StringVar(); self.status=tk.StringVar(value='Open an MBOX archive. Your emails stay on this computer.')
         self.archives=load_library(); self.enriching=False; self.attachment_window=None
+        # A single worker prevents concurrent expensive searches.
+        self.search_jobs = queue.Queue(maxsize=1)
+        self.search_request = 0
+        self.search_timer = None
+        threading.Thread(target=self._search_worker, daemon=True).start()
         self._build(); self.after(150,self.poll)
         if self.archives: self.after(300,lambda:self.load_archive(self.archives[0],startup=True))
 
