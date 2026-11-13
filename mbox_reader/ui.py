@@ -3,7 +3,7 @@ import email
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesHeaderParser
-from email.utils import parsedate_to_datetime
+from email.utils import parsedate_to_datetime, getaddresses
 from html.parser import HTMLParser
 from pathlib import Path
 import tkinter as tk
@@ -41,13 +41,21 @@ class UiMixin:
         ttk.Button(top,text='Index content',command=self.start_enrichment).pack(side='left',padx=4)
         ttk.Button(top,text='Export selected EMLs',command=self.save_selected_emls).pack(side='left',padx=4)
         filters=ttk.Frame(self,padding=(12,0,12,8));filters.pack(fill='x')
-        ttk.Label(filters,text='Recipient').pack(side='left')
-        recipient=ttk.Entry(filters,textvariable=self.recipient_filter,width=26);recipient.pack(side='left',padx=6)
+        ttk.Label(filters,text='From').pack(side='left')
+        sender=ttk.Combobox(filters,textvariable=self.sender_filter,width=23)
+        sender.pack(side='left',padx=6)
+        ttk.Label(filters,text='To').pack(side='left')
+        recipient=ttk.Combobox(filters,textvariable=self.recipient_filter,width=23)
+        recipient.pack(side='left',padx=6)
+        self.address_boxes={'sender':sender,'recipient':recipient}
+        for field,widget in self.address_boxes.items():
+            widget.bind('<KeyRelease>',lambda event,f=field:self.schedule_address_suggestions(f))
+            widget.bind('<<ComboboxSelected>>',lambda event:self.refresh(reset=True))
         ttk.Label(filters,text='From (YYYY-MM-DD)').pack(side='left')
         start=ttk.Entry(filters,textvariable=self.start_date_filter,width=12);start.pack(side='left',padx=6)
         ttk.Label(filters,text='Through (YYYY-MM-DD)').pack(side='left')
         end=ttk.Entry(filters,textvariable=self.end_date_filter,width=12);end.pack(side='left',padx=6)
-        for entry in (recipient,start,end):
+        for entry in (sender,recipient,start,end):
             entry.bind('<Return>',lambda event:self.refresh(reset=True))
         ttk.Button(filters,text='Apply',command=lambda:self.refresh(reset=True)).pack(side='left')
         ttk.Button(filters,text='Clear filters',command=self.clear_filters).pack(side='left',padx=5)
@@ -111,10 +119,60 @@ class UiMixin:
 
     def clear_filters(self):
         """Clear recipient and date filters."""
+        self.sender_filter.set('')
         self.recipient_filter.set('')
         self.start_date_filter.set('')
         self.end_date_filter.set('')
         self.refresh(reset=True)
+
+    def schedule_address_suggestions(self, field):
+        """Debounce address suggestions to avoid blocking while typing."""
+        if self.suggestion_timer is not None:
+            self.after_cancel(self.suggestion_timer)
+        self.suggestion_timer=self.after(250,lambda:self._queue_address_suggestions(field))
+
+    def _queue_address_suggestions(self, field):
+        self.suggestion_timer=None
+        if not self.db or not self.conn:return
+        self.suggestion_request+=1
+        value=(self.sender_filter if field=='sender' else self.recipient_filter).get().strip()
+        if not value:
+            self.address_boxes[field]['values']=[]
+            return
+        self.events.put(('suggestions_requested',self.generation,(self.suggestion_request,field,value,str(self.db))))
+        # Run the potentially expensive address scan outside Tk's event loop.
+        threading.Thread(target=self._address_suggestion_worker,
+                         args=(self.generation,self.suggestion_request,field,value,str(self.db)),
+                         daemon=True).start()
+
+    def _address_suggestion_worker(self,generation,request_id,field,value,db):
+        """Return distinct sender or recipient email addresses matching input."""
+        connection=None
+        try:
+            connection=sqlite3.connect(Path(db).resolve().as_uri()+'?mode=ro',uri=True,timeout=5)
+            column='sender' if field=='sender' else 'recipient'
+            # Limit candidates so large archives don't stall the dropdown.
+            rows=connection.execute(
+                f'SELECT DISTINCT {column} FROM messages WHERE {column} LIKE ? LIMIT 1200',
+                ('%'+value+'%',)).fetchall()
+            matches=set()
+            for (header,) in rows:
+                for _,address in getaddresses([header or '']):
+                    if value.casefold() in address.casefold():
+                        matches.add(address)
+            suggestions=sorted(matches,key=lambda x:(not x.lower().startswith(value.lower()),x.lower()))[:40]
+            self.events.put(('address_suggestions',generation,(request_id,field,value,suggestions)))
+        except sqlite3.Error:
+            pass
+        finally:
+            if connection:connection.close()
+
+    def display_address_suggestions(self,data):
+        request_id,field,value,suggestions=data
+        widget=self.address_boxes[field]
+        variable=self.sender_filter if field=='sender' else self.recipient_filter
+        if request_id!=self.suggestion_request or variable.get().strip()!=value:return
+        widget['values']=suggestions
 
     def select_all_page(self,event=None):
         self.tree.selection_set(self.tree.get_children())
@@ -180,7 +238,7 @@ class UiMixin:
         request = (
             self.generation, request_id, str(self.db),
             self.search.get().strip(), self.folder, self.offset,
-            self.recipient_filter.get().strip(), self.start_date_filter.get().strip(),
+            self.sender_filter.get().strip(), self.recipient_filter.get().strip(), self.start_date_filter.get().strip(),
             self.end_date_filter.get().strip()
         )
         # Queue size one: replace obsolete pending searches with the newest.
@@ -194,7 +252,7 @@ class UiMixin:
             self.search_jobs.put_nowait(request)
 
     @staticmethod
-    def _search_rows(db, query, folder, offset, recipient='', start_date='', end_date=''):
+    def _search_rows(db, query, folder, offset, sender='', recipient='', start_date='', end_date=''):
         """Query a single page using a connection owned by the worker thread."""
         conditions = []
         args = []
@@ -211,7 +269,7 @@ class UiMixin:
                         conditions.append('m.subject LIKE ?')
                         args.append('%' + value + '%')
                     elif field == 'to':
-                        conditions.append('EXISTS (SELECT 1 FROM extra e WHERE e.start=m.start AND e.recipient LIKE ?)')
+                        conditions.append('m.recipient LIKE ?')
                         args.append('%' + value + '%')
                     elif field == 'after':
                         conditions.append('m.date >= ?')
@@ -237,6 +295,9 @@ class UiMixin:
                 'EXISTS (SELECT 1 FROM body_fts bf WHERE bf.start=m.start AND bf.body LIKE ?)'
             ]) + ')')
             args.extend(['%' + token + '%'] * 4)
+        if sender:
+            conditions.append('m.sender LIKE ?')
+            args.append('%'+sender+'%')
         if recipient:
             conditions.append('m.recipient LIKE ?')
             args.append('%'+recipient+'%')
@@ -280,9 +341,9 @@ class UiMixin:
     def _search_worker(self):
         """Execute database searches away from the Tkinter main thread."""
         while True:
-            generation, request_id, db, query, folder, offset, recipient, start_date, end_date = self.search_jobs.get()
+            generation, request_id, db, query, folder, offset, sender, recipient, start_date, end_date = self.search_jobs.get()
             try:
-                result = self._search_rows(db, query, folder, offset, recipient, start_date, end_date)
+                result = self._search_rows(db, query, folder, offset, sender, recipient, start_date, end_date)
                 self.events.put(('search_result', generation, (request_id, result)))
             except sqlite3.Error as exc:
                 self.events.put(('search_error', generation, (request_id, str(exc))))
