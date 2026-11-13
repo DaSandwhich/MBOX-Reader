@@ -83,9 +83,9 @@ class AttachmentsMixin:
         """
         from io import BytesIO
         try:
-            from PIL import Image, ImageTk
+            from PIL import Image, ImageTk, ImageOps
         except ImportError:
-            Image=ImageTk=None
+            Image=ImageTk=ImageOps=None
 
         image_parts=[
             part for part in message.walk()
@@ -107,8 +107,12 @@ class AttachmentsMixin:
             try:
                 if Image is not None:
                     with Image.open(BytesIO(raw)) as source:
-                        source.thumbnail((460,320))
-                        preview=ImageTk.PhotoImage(source.copy(),master=self)
+                        # Camera phones often store rotation in EXIF metadata
+                        # rather than rotating the pixel data. Apply it before
+                        # resizing so portrait/landscape previews are upright.
+                        oriented=ImageOps.exif_transpose(source)
+                        oriented.thumbnail((460,320))
+                        preview=ImageTk.PhotoImage(oriented.copy(),master=self)
                 else:
                     import base64
                     if part.get_content_type() not in ('image/png','image/gif'):
