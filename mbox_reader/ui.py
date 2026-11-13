@@ -358,7 +358,11 @@ class UiMixin:
                 source.seek(start)
                 msg=email.message_from_bytes(source.read(stop-start),policy=policy.default)
                 full=body_text(msg).strip()
-                if full=='(No readable text body found.)':
+                # HTML-only messages need their link destinations preserved.
+                has_plain=any(p.get_content_type()=='text/plain' and
+                              p.get_content_disposition()!='attachment'
+                              for p in msg.walk())
+                if not has_plain:
                     full=html_text(msg) or full
                 short,has_quote=self.clean_reply(full)
                 card=ttk.LabelFrame(self.thread_content,
