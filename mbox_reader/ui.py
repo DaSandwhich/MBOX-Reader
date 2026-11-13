@@ -70,6 +70,9 @@ class UiMixin:
         ).pack(side='left',padx=(0,6))
         for entry in (sender,recipient,start,end):
             entry.bind('<Return>',lambda event:self.refresh(reset=True))
+        ttk.Checkbutton(filters,text='Attachments only',
+                        variable=self.attachments_only,
+                        command=lambda:self.refresh(reset=True)).pack(side='left',padx=5)
         ttk.Button(filters,text='Apply',command=lambda:self.refresh(reset=True)).pack(side='left')
         ttk.Button(filters,text='Clear filters',command=self.clear_filters).pack(side='left',padx=5)
         main=ttk.Frame(self); main.pack(fill='both',expand=True,padx=12,pady=(0,8))
@@ -136,6 +139,7 @@ class UiMixin:
         self.recipient_filter.set('')
         self.start_date_filter.set('')
         self.end_date_filter.set('')
+        self.attachments_only.set(False)
         self.refresh(reset=True)
 
     def schedule_address_suggestions(self, field):
@@ -252,7 +256,7 @@ class UiMixin:
             self.generation, request_id, str(self.db),
             self.search.get().strip(), self.folder, self.offset,
             self.sender_filter.get().strip(), self.recipient_filter.get().strip(), self.start_date_filter.get().strip(),
-            self.end_date_filter.get().strip()
+            self.end_date_filter.get().strip(), self.attachments_only.get()
         )
         # Queue size one: replace obsolete pending searches with the newest.
         try:
@@ -265,7 +269,7 @@ class UiMixin:
             self.search_jobs.put_nowait(request)
 
     @staticmethod
-    def _search_rows(db, query, folder, offset, sender='', recipient='', start_date='', end_date=''):
+    def _search_rows(db, query, folder, offset, sender='', recipient='', start_date='', end_date='', attachments_only=False):
         """Query a single page using a connection owned by the worker thread."""
         conditions = []
         args = []
@@ -321,6 +325,9 @@ class UiMixin:
             from datetime import date, timedelta
             conditions.append('m.date < ?')
             args.append((date.fromisoformat(end_date)+timedelta(days=1)).isoformat())
+        if attachments_only:
+            # Attachment metadata is populated by the optional content index.
+            conditions.append('EXISTS (SELECT 1 FROM attachments a WHERE a.start=m.start)')
         if folder.startswith('Label: '):
             conditions.append('EXISTS (SELECT 1 FROM message_labels ml WHERE ml.start=m.start AND ml.label=?)')
             args.append(folder[7:])
@@ -354,9 +361,9 @@ class UiMixin:
     def _search_worker(self):
         """Execute database searches away from the Tkinter main thread."""
         while True:
-            generation, request_id, db, query, folder, offset, sender, recipient, start_date, end_date = self.search_jobs.get()
+            generation, request_id, db, query, folder, offset, sender, recipient, start_date, end_date, attachments_only = self.search_jobs.get()
             try:
-                result = self._search_rows(db, query, folder, offset, sender, recipient, start_date, end_date)
+                result = self._search_rows(db, query, folder, offset, sender, recipient, start_date, end_date, attachments_only)
                 self.events.put(('search_result', generation, (request_id, result)))
             except sqlite3.Error as exc:
                 self.events.put(('search_error', generation, (request_id, str(exc))))
