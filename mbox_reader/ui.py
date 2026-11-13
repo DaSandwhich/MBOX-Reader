@@ -386,6 +386,9 @@ class UiMixin:
             state='normal' if offset + PAGE_SIZE < total else 'disabled'
         )
         self.status.set(f'{total:,} matching messages.')
+        # Keep an already-open attachment browser in sync with the visible page.
+        if self.attachment_window and self.attachment_window.winfo_exists():
+            self.populate_attachments()
 
     def change_page(self,delta):self.offset=max(0,self.offset+delta*PAGE_SIZE);self.refresh()
 
