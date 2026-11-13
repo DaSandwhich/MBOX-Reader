@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sqlite3, threading, queue, re, os, hashlib, time, json, tempfile, webbrowser, html, shutil
 
+from .hyperlinks import insert_links, html_text
 from .core import PAGE_SIZE, conversation_subject, library_file, load_library, save_library, decoded, date_string, part_text, body_text, cache_path, connect, metadata, index_archive, normalize_id, message_refs, safe_filename, index_content_worker, HTMLText
 
 class UiMixin:
@@ -39,6 +40,17 @@ class UiMixin:
         ttk.Button(top,text='Attachments',command=self.show_attachment_library).pack(side='left',padx=4)
         ttk.Button(top,text='Index content',command=self.start_enrichment).pack(side='left',padx=4)
         ttk.Button(top,text='Export selected EMLs',command=self.save_selected_emls).pack(side='left',padx=4)
+        filters=ttk.Frame(self,padding=(12,0,12,8));filters.pack(fill='x')
+        ttk.Label(filters,text='Recipient').pack(side='left')
+        recipient=ttk.Entry(filters,textvariable=self.recipient_filter,width=26);recipient.pack(side='left',padx=6)
+        ttk.Label(filters,text='From (YYYY-MM-DD)').pack(side='left')
+        start=ttk.Entry(filters,textvariable=self.start_date_filter,width=12);start.pack(side='left',padx=6)
+        ttk.Label(filters,text='Through (YYYY-MM-DD)').pack(side='left')
+        end=ttk.Entry(filters,textvariable=self.end_date_filter,width=12);end.pack(side='left',padx=6)
+        for entry in (recipient,start,end):
+            entry.bind('<Return>',lambda event:self.refresh(reset=True))
+        ttk.Button(filters,text='Apply',command=lambda:self.refresh(reset=True)).pack(side='left')
+        ttk.Button(filters,text='Clear filters',command=self.clear_filters).pack(side='left',padx=5)
         main=ttk.Frame(self); main.pack(fill='both',expand=True,padx=12,pady=(0,8))
         sidebar=ttk.Frame(main,width=175,padding=(0,12,10,0)); sidebar.pack(side='left',fill='y');sidebar.pack_propagate(False)
         ttk.Label(sidebar,text='FOLDERS',font=('Segoe UI',10,'bold')).pack(anchor='w',padx=10,pady=(0,10))
@@ -97,6 +109,13 @@ class UiMixin:
         self.bar=ttk.Progressbar(self,mode='determinate',maximum=100);self.bar.pack(fill='x',padx=12)
         ttk.Label(self,textvariable=self.status,anchor='w',padding=(12,6)).pack(fill='x')
 
+    def clear_filters(self):
+        """Clear recipient and date filters."""
+        self.recipient_filter.set('')
+        self.start_date_filter.set('')
+        self.end_date_filter.set('')
+        self.refresh(reset=True)
+
     def select_all_page(self,event=None):
         self.tree.selection_set(self.tree.get_children())
         return 'break'
@@ -137,6 +156,18 @@ class UiMixin:
         if self.search_timer is not None:
             self.after_cancel(self.search_timer)
         self.status.set("Searching messages…")
+        from datetime import date
+        try:
+            for value in (self.start_date_filter.get().strip(),self.end_date_filter.get().strip()):
+                if value and date.fromisoformat(value).isoformat()!=value:
+                    raise ValueError
+        except ValueError:
+            self.status.set('Use YYYY-MM-DD for dates.')
+            return
+        if (self.start_date_filter.get().strip() and self.end_date_filter.get().strip()
+                and self.start_date_filter.get().strip()>self.end_date_filter.get().strip()):
+            self.status.set('Start date must be before end date.')
+            return
         self.search_timer = self.after(
             120, lambda: self._queue_search(request_id)
         )
@@ -148,7 +179,9 @@ class UiMixin:
             return
         request = (
             self.generation, request_id, str(self.db),
-            self.search.get().strip(), self.folder, self.offset
+            self.search.get().strip(), self.folder, self.offset,
+            self.recipient_filter.get().strip(), self.start_date_filter.get().strip(),
+            self.end_date_filter.get().strip()
         )
         # Queue size one: replace obsolete pending searches with the newest.
         try:
@@ -161,7 +194,7 @@ class UiMixin:
             self.search_jobs.put_nowait(request)
 
     @staticmethod
-    def _search_rows(db, query, folder, offset):
+    def _search_rows(db, query, folder, offset, recipient='', start_date='', end_date=''):
         """Query a single page using a connection owned by the worker thread."""
         conditions = []
         args = []
@@ -204,6 +237,16 @@ class UiMixin:
                 'EXISTS (SELECT 1 FROM body_fts bf WHERE bf.start=m.start AND bf.body LIKE ?)'
             ]) + ')')
             args.extend(['%' + token + '%'] * 4)
+        if recipient:
+            conditions.append('m.recipient LIKE ?')
+            args.append('%'+recipient+'%')
+        if start_date:
+            conditions.append('m.date >= ?')
+            args.append(start_date)
+        if end_date:
+            from datetime import date, timedelta
+            conditions.append('m.date < ?')
+            args.append((date.fromisoformat(end_date)+timedelta(days=1)).isoformat())
         if folder.startswith('Label: '):
             conditions.append('EXISTS (SELECT 1 FROM message_labels ml WHERE ml.start=m.start AND ml.label=?)')
             args.append(folder[7:])
@@ -237,9 +280,9 @@ class UiMixin:
     def _search_worker(self):
         """Execute database searches away from the Tkinter main thread."""
         while True:
-            generation, request_id, db, query, folder, offset = self.search_jobs.get()
+            generation, request_id, db, query, folder, offset, recipient, start_date, end_date = self.search_jobs.get()
             try:
-                result = self._search_rows(db, query, folder, offset)
+                result = self._search_rows(db, query, folder, offset, recipient, start_date, end_date)
                 self.events.put(('search_result', generation, (request_id, result)))
             except sqlite3.Error as exc:
                 self.events.put(('search_error', generation, (request_id, str(exc))))
@@ -315,6 +358,8 @@ class UiMixin:
                 source.seek(start)
                 msg=email.message_from_bytes(source.read(stop-start),policy=policy.default)
                 full=body_text(msg).strip()
+                if full=='(No readable text body found.)':
+                    full=html_text(msg) or full
                 short,has_quote=self.clean_reply(full)
                 card=ttk.LabelFrame(self.thread_content,
                     text=f'{decoded(msg.get("From"))}  ·  {date_string(msg.get("Date"))}',
@@ -340,7 +385,7 @@ class UiMixin:
                     if not expanded[0]:
                         content=short[:180]+('…' if len(short)>180 else '')
                     body.configure(state='normal')
-                    body.delete('1.0','end');body.insert('1.0',content)
+                    body.delete('1.0','end');insert_links(body,content)
                     body.configure(height=min(28,max(2,content.count('\\n')+1,len(content)//75+1)),
                                    state='disabled')
                     toggle.configure(text='Collapse' if expanded[0] else 'Expand')

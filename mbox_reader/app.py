@@ -25,7 +25,11 @@ class Reader(UiMixin, ArchivesMixin, ConversationsMixin, ExportsMixin, Attachmen
     def __init__(self):
         super().__init__(); self.title('Mail Archive — Gmail-style Offline MBOX Reader'); self.geometry('1200x740'); self.minsize(800,480)
         self.path=None; self.db=None; self.conn=None; self.events=queue.Queue(); self.generation=0
-        self.offset=0; self.current=None; self.bulk_running=False; self.folder='All Mail'; self.search=tk.StringVar(); self.status=tk.StringVar(value='Open an MBOX archive. Your emails stay on this computer.')
+        self.offset=0; self.current=None; self.bulk_running=False; self.folder='All Mail'; self.search=tk.StringVar()
+        self.recipient_filter=tk.StringVar()
+        self.start_date_filter=tk.StringVar()
+        self.end_date_filter=tk.StringVar()
+        self.status=tk.StringVar(value='Open an MBOX archive. Your emails stay on this computer.')
         self.archives=load_library(); self.enriching=False; self.attachment_window=None
         # A single worker prevents concurrent expensive searches.
         self.search_jobs = queue.Queue(maxsize=1)

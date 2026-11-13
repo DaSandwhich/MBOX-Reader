@@ -87,7 +87,9 @@ def cache_path(path):
 def connect(db):
     c=sqlite3.connect(str(db), timeout=20)
     c.execute('PRAGMA journal_mode=WAL')
-    c.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, start INTEGER NOT NULL, stop INTEGER NOT NULL, date TEXT, sender TEXT, subject TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, start INTEGER NOT NULL, stop INTEGER NOT NULL, date TEXT, sender TEXT, subject TEXT, recipient TEXT DEFAULT '')')
+    if 'recipient' not in {x[1] for x in c.execute('PRAGMA table_info(messages)')}:
+        c.execute("ALTER TABLE messages ADD COLUMN recipient TEXT DEFAULT ''")
     c.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS flags (start INTEGER PRIMARY KEY, starred INTEGER NOT NULL DEFAULT 0, read INTEGER NOT NULL DEFAULT 0)')
     c.execute('CREATE TABLE IF NOT EXISTS labels (name TEXT PRIMARY KEY)')
@@ -106,6 +108,24 @@ def index_archive(path, db, events, generation):
         st=os.stat(path); signature=f'{st.st_size}:{st.st_mtime_ns}'
         meta=metadata(c)
         if meta.get('signature')==signature and meta.get('complete')=='1':
+            if meta.get('recipient_index')!='1':
+                # Preserve existing flags and labels while filling cached recipients.
+                rows=c.execute('SELECT id,start FROM messages').fetchall()
+                with open(path,'rb') as source:
+                    for i,(mid,start) in enumerate(rows,1):
+                        source.seek(start)
+                        header=bytearray()
+                        while len(header)<262144:
+                            line=source.readline()
+                            if not line or line in (b'\\n',b'\\r\\n'):break
+                            header.extend(line)
+                        m=BytesHeaderParser(policy=policy.default).parsebytes(bytes(header)+b'\\n')
+                        c.execute('UPDATE messages SET recipient=? WHERE id=?',(decoded(m.get('To','')),mid))
+                        if i%500==0:
+                            c.commit()
+                            events.put(('progress',generation,(i,int(st.st_size*i/max(len(rows),1)),st.st_size)))
+                c.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES ('recipient_index','1')")
+                c.commit()
             events.put(('ready',generation,True)); return
         c.execute('DELETE FROM messages'); c.execute('DELETE FROM metadata'); c.execute('DELETE FROM flags');
         c.execute('DELETE FROM extra'); c.execute('DELETE FROM attachments'); c.execute('DELETE FROM body_fts'); c.execute('DELETE FROM message_labels'); c.commit()
@@ -130,9 +150,9 @@ def index_archive(path, db, events, generation):
                     for a,b,h in batch:
                         try:
                             m=BytesHeaderParser(policy=policy.default).parsebytes(h+b'\n')
-                            rows.append((a,b,date_string(m.get('Date','')),decoded(m.get('From','')),decoded(m.get('Subject','(No subject)'))))
-                        except Exception: rows.append((a,b,'','','(Unreadable headers)'))
-                    c.executemany('INSERT INTO messages(start,stop,date,sender,subject) VALUES (?,?,?,?,?)',rows)
+                            rows.append((a,b,date_string(m.get('Date','')),decoded(m.get('From','')),decoded(m.get('Subject','(No subject)')),decoded(m.get('To',''))))
+                        except Exception: rows.append((a,b,'','','(Unreadable headers)',''))
+                    c.executemany('INSERT INTO messages(start,stop,date,sender,subject,recipient) VALUES (?,?,?,?,?,?)',rows)
                     c.commit(); count+=len(batch); batch.clear()
                     now=time.monotonic()
                     if now-last_update>0.4:
@@ -142,11 +162,11 @@ def index_archive(path, db, events, generation):
                 for a,b,h in batch:
                     try:
                         m=BytesHeaderParser(policy=policy.default).parsebytes(h+b'\n')
-                        rows.append((a,b,date_string(m.get('Date','')),decoded(m.get('From','')),decoded(m.get('Subject','(No subject)'))))
-                    except Exception: rows.append((a,b,'','','(Unreadable headers)'))
-                c.executemany('INSERT INTO messages(start,stop,date,sender,subject) VALUES (?,?,?,?,?)',rows)
+                        rows.append((a,b,date_string(m.get('Date','')),decoded(m.get('From','')),decoded(m.get('Subject','(No subject)')),decoded(m.get('To',''))))
+                    except Exception: rows.append((a,b,'','','(Unreadable headers)',''))
+                c.executemany('INSERT INTO messages(start,stop,date,sender,subject,recipient) VALUES (?,?,?,?,?,?)',rows)
                 count+=len(rows)
-            c.executemany('INSERT INTO metadata(key,value) VALUES (?,?)',[('signature',signature),('complete','1')]); c.commit()
+            c.executemany('INSERT INTO metadata(key,value) VALUES (?,?)',[('signature',signature),('complete','1'),('recipient_index','1')]); c.commit()
         events.put(('ready',generation,False))
     except Exception as exc: events.put(('error',generation,str(exc)))
     finally: c.close()
