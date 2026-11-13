@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sqlite3, threading, queue, re, os, hashlib, time, json, tempfile, webbrowser, html, shutil
 
+from .calendar_picker import show_calendar
 from .hyperlinks import insert_links, html_text
 from .core import PAGE_SIZE, conversation_subject, library_file, load_library, save_library, decoded, date_string, part_text, body_text, cache_path, connect, metadata, index_archive, normalize_id, message_refs, safe_filename, index_content_worker, HTMLText
 
@@ -52,9 +53,21 @@ class UiMixin:
             widget.bind('<KeyRelease>',lambda event,f=field:self.schedule_address_suggestions(f))
             widget.bind('<<ComboboxSelected>>',lambda event:self.refresh(reset=True))
         ttk.Label(filters,text='From (YYYY-MM-DD)').pack(side='left')
-        start=ttk.Entry(filters,textvariable=self.start_date_filter,width=12);start.pack(side='left',padx=6)
+        start=ttk.Entry(filters,textvariable=self.start_date_filter,width=12)
+        start.pack(side='left',padx=(6,2))
+        ttk.Button(
+            filters,text='📅',width=3,
+            command=lambda:show_calendar(self,start,self.start_date_filter,
+                                         lambda:self.refresh(reset=True))
+        ).pack(side='left',padx=(0,6))
         ttk.Label(filters,text='Through (YYYY-MM-DD)').pack(side='left')
-        end=ttk.Entry(filters,textvariable=self.end_date_filter,width=12);end.pack(side='left',padx=6)
+        end=ttk.Entry(filters,textvariable=self.end_date_filter,width=12)
+        end.pack(side='left',padx=(6,2))
+        ttk.Button(
+            filters,text='📅',width=3,
+            command=lambda:show_calendar(self,end,self.end_date_filter,
+                                         lambda:self.refresh(reset=True))
+        ).pack(side='left',padx=(0,6))
         for entry in (sender,recipient,start,end):
             entry.bind('<Return>',lambda event:self.refresh(reset=True))
         ttk.Button(filters,text='Apply',command=lambda:self.refresh(reset=True)).pack(side='left')
