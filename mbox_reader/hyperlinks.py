@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 from .core import part_text
 
-URLS=re.compile(r'https?://[^\\s<>"\\']+|mailto:[^\\s<>"\\']+|(?<![\\w@])[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}',re.I)
+URLS=re.compile(r"(?i)https?://[^\\s<>\\\"]+|mailto:[^\\s<>\\\"]+|(?<![\\w@])[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}")
 
 def safe_url(raw):
     """Only permit browser and mail links, not executable URL schemes."""
@@ -42,7 +42,7 @@ class SafeHTML(HTMLParser):
     def handle_starttag(self,tag,attrs):
         if tag in ('script','style','head'):self.skip+=1
         if self.skip:return
-        if tag in ('p','div','br','li','tr'):self.parts.append('\\n')
+        if tag in ('p','div','br','li','tr'):self.parts.append('\n')
         if tag=='a':self.href=safe_url(dict(attrs).get('href') or '')
     def handle_endtag(self,tag):
         if tag in ('script','style','head') and self.skip:self.skip-=1;return
@@ -50,7 +50,7 @@ class SafeHTML(HTMLParser):
         if tag=='a':
             if self.href:self.parts.append(' ('+self.href+')')
             self.href=None
-        if tag in ('p','div','li','tr'):self.parts.append('\\n')
+        if tag in ('p','div','li','tr'):self.parts.append('\n')
     def handle_data(self,data):
         if not self.skip:self.parts.append(data)
 
