@@ -1,0 +1,1 @@
+"""Offline MBOX reader package."""
