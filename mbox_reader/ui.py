@@ -165,7 +165,7 @@ class UiMixin:
         """Query a single page using a connection owned by the worker thread."""
         conditions = []
         args = []
-        for token in re.findall(r'"[^"]*"|\\S+', query):
+        for token in re.findall(r'"[^"]*"|\S+', query):
             token = token.strip('"')
             if ':' in token:
                 field, value = token.split(':', 1)
