@@ -39,7 +39,7 @@ class AttachmentsMixin:
         win=tk.Toplevel(self);win.title('Attachment library');win.geometry('850x550')
         self.attachment_window=win
         top=ttk.Frame(win,padding=8);top.pack(fill='x')
-        ttk.Label(top,text='Attachments found by content indexing').pack(side='left')
+        ttk.Label(top,text='Attachments in currently displayed emails').pack(side='left')
         ttk.Button(top,text='Refresh',command=self.populate_attachments).pack(side='right')
         ttk.Button(top,text='Save selected',command=self.export_library_attachments).pack(side='right',padx=5)
         self.attachment_tree=ttk.Treeview(win,columns=('name','type','size','sender'),show='headings',selectmode='extended')
@@ -49,11 +49,81 @@ class AttachmentsMixin:
         self.populate_attachments()
 
     def populate_attachments(self):
-        if not self.conn or not self.attachment_window or not self.attachment_window.winfo_exists():return
-        tree=self.attachment_tree;tree.delete(*tree.get_children())
-        rows=self.conn.execute('SELECT a.start,a.part_number,a.filename,a.mime,a.size,m.sender FROM attachments a JOIN messages m ON m.start=a.start ORDER BY m.id DESC LIMIT 2000').fetchall()
+        """Show attachments for exactly the email rows visible in the results list.
+
+        This deliberately uses the current page's message IDs, not a separate
+        approximation of the search filters.
+        """
+        if not self.conn or not self.attachment_window or not self.attachment_window.winfo_exists():
+            return
+        tree=self.attachment_tree
+        tree.delete(*tree.get_children())
+        message_ids=[int(iid) for iid in self.tree.get_children()]
+        self.attachment_rows=[]
+        if not message_ids:
+            return
+        placeholders=','.join('?' for _ in message_ids)
+        rows=self.conn.execute(
+            'SELECT a.start,a.part_number,a.filename,a.mime,a.size,m.sender '
+            'FROM attachments a JOIN messages m ON m.start=a.start '
+            f'WHERE m.id IN ({placeholders}) ORDER BY m.id DESC,a.part_number',
+            message_ids
+        ).fetchall()
         self.attachment_rows=rows
-        for i,row in enumerate(rows):tree.insert('','end',iid=str(i),values=(row[2],row[3],f'{row[4]/1024:.1f} KB',row[5]))
+        for i,row in enumerate(rows):
+            tree.insert('','end',iid=str(i),values=(
+                row[2],row[3],f'{(row[4] or 0)/1024:.1f} KB',row[5]
+            ))
+
+    def show_inline_images(self, card, message):
+        """Display local image attachments below the email's text.
+
+        Tkinter supports PNG/GIF natively. Pillow is optional and enables
+        JPEG and other formats plus better thumbnail resizing.
+        """
+        from io import BytesIO
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            Image=ImageTk=None
+
+        image_parts=[
+            part for part in message.walk()
+            if not part.is_multipart()
+            and part.get_content_type().startswith('image/')
+            and (part.get_filename() or part.get_content_disposition()=='attachment')
+        ]
+        if not image_parts:
+            return
+        section=ttk.LabelFrame(card,text='Image attachments',padding=8)
+        section.pack(fill='x',pady=(6,4))
+        for part in image_parts[:12]:
+            name=decoded(part.get_filename() or 'Attached image')
+            ttk.Label(section,text=name,wraplength=440).pack(anchor='w',pady=(4,2))
+            raw=part.get_payload(decode=True) or b''
+            if len(raw)>15*1024*1024:
+                ttk.Label(section,text='Preview unavailable: image exceeds 15 MB.').pack(anchor='w')
+                continue
+            try:
+                if Image is not None:
+                    with Image.open(BytesIO(raw)) as source:
+                        source.thumbnail((460,320))
+                        preview=ImageTk.PhotoImage(source.copy(),master=self)
+                else:
+                    import base64
+                    if part.get_content_type() not in ('image/png','image/gif'):
+                        raise ValueError('Install Pillow to preview JPEG and other image types.')
+                    preview=tk.PhotoImage(data=base64.b64encode(raw).decode('ascii'),master=self)
+                    if preview.width()>460 or preview.height()>320:
+                        factor=max((preview.width()+459)//460,(preview.height()+319)//320)
+                        preview=preview.subsample(factor,factor)
+                label=ttk.Label(section,image=preview)
+                label.image=preview  # Tkinter requires a retained Python reference.
+                label.pack(anchor='w',pady=(0,8))
+            except Exception:
+                ttk.Label(section,text='Preview unavailable for this image format.').pack(anchor='w')
+        if len(image_parts)>12:
+            ttk.Label(section,text=f'{len(image_parts)-12} more image(s) not previewed.').pack(anchor='w')
 
     def export_library_attachments(self):
         if not self.conn:return

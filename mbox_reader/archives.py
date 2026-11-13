@@ -34,6 +34,7 @@ class ArchivesMixin:
         save_library(self.archives)
         self.generation+=1
         self.search_request += 1  # Ignore results from the previous archive.
+        self.suggestion_request += 1
         if self.conn:self.conn.close();self.conn=None
         self.path=None;self.db=None;self.current=None
         self.tree.delete(*self.tree.get_children())
@@ -58,6 +59,7 @@ class ArchivesMixin:
         save_library(self.archives)
         self.generation+=1; gen=self.generation
         self.search_request += 1  # Invalidate pending search results.
+        self.suggestion_request += 1
         if self.conn:self.conn.close();self.conn=None
         self.path=path; self.db=cache_path(path); self.offset=0; self.current=None
         self.update_archive_choices()
@@ -81,6 +83,10 @@ class ArchivesMixin:
                     self.conn=connect(self.db); self.bar['value']=100; self.open_btn.configure(state='normal')
                     self.load_labels(); self.refresh(); n=self.conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
                     self.status.set(f'{n:,} messages indexed. '+('Loaded saved index instantly.' if data else 'Index saved for faster reopening.'))
+                elif kind=='address_suggestions':
+                    self.display_address_suggestions(data)
+                elif kind=='suggestions_requested':
+                    pass
                 elif kind=='search_result':
                     request_id, result = data
                     if request_id == self.search_request:

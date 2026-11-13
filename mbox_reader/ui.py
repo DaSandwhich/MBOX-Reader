@@ -3,13 +3,15 @@ import email
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesHeaderParser
-from email.utils import parsedate_to_datetime
+from email.utils import parsedate_to_datetime, getaddresses
 from html.parser import HTMLParser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sqlite3, threading, queue, re, os, hashlib, time, json, tempfile, webbrowser, html, shutil
 
+from .calendar_picker import show_calendar
+from .hyperlinks import insert_links, html_text
 from .core import PAGE_SIZE, conversation_subject, library_file, load_library, save_library, decoded, date_string, part_text, body_text, cache_path, connect, metadata, index_archive, normalize_id, message_refs, safe_filename, index_content_worker, HTMLText
 
 class UiMixin:
@@ -36,9 +38,40 @@ class UiMixin:
         ent.bind('<Return>',lambda _:self.refresh(reset=True))
         ttk.Button(top,text='Search',command=lambda:self.refresh(reset=True)).pack(side='left')
         ttk.Button(top,text='Clear',command=lambda:(self.search.set(''),self.refresh(reset=True))).pack(side='left',padx=5)
-        ttk.Button(top,text='Attachments',command=self.show_attachment_library).pack(side='left',padx=4)
         ttk.Button(top,text='Index content',command=self.start_enrichment).pack(side='left',padx=4)
         ttk.Button(top,text='Export selected EMLs',command=self.save_selected_emls).pack(side='left',padx=4)
+        filters=ttk.Frame(self,padding=(12,0,12,8));filters.pack(fill='x')
+        ttk.Label(filters,text='From').pack(side='left')
+        sender=ttk.Combobox(filters,textvariable=self.sender_filter,width=23)
+        sender.pack(side='left',padx=6)
+        ttk.Label(filters,text='To').pack(side='left')
+        recipient=ttk.Combobox(filters,textvariable=self.recipient_filter,width=23)
+        recipient.pack(side='left',padx=6)
+        self.address_boxes={'sender':sender,'recipient':recipient}
+        for field,widget in self.address_boxes.items():
+            widget.bind('<KeyRelease>',lambda event,f=field:self.schedule_address_suggestions(f))
+            widget.bind('<<ComboboxSelected>>',lambda event:self.refresh(reset=True))
+        ttk.Label(filters,text='From (YYYY-MM-DD)').pack(side='left')
+        start=ttk.Entry(filters,textvariable=self.start_date_filter,width=12)
+        start.pack(side='left',padx=(6,2))
+        ttk.Button(
+            filters,text='📅',width=3,
+            command=lambda:show_calendar(self,start,self.start_date_filter,
+                                         lambda:self.refresh(reset=True))
+        ).pack(side='left',padx=(0,6))
+        ttk.Label(filters,text='Through (YYYY-MM-DD)').pack(side='left')
+        end=ttk.Entry(filters,textvariable=self.end_date_filter,width=12)
+        end.pack(side='left',padx=(6,2))
+        ttk.Button(
+            filters,text='📅',width=3,
+            command=lambda:show_calendar(self,end,self.end_date_filter,
+                                         lambda:self.refresh(reset=True))
+        ).pack(side='left',padx=(0,6))
+        for entry in (sender,recipient,start,end):
+            entry.bind('<Return>',lambda event:self.refresh(reset=True))
+        ttk.Button(filters,text='Attachments',command=self.show_attachment_library).pack(side='left',padx=5)
+        ttk.Button(filters,text='Apply',command=lambda:self.refresh(reset=True)).pack(side='left')
+        ttk.Button(filters,text='Clear filters',command=self.clear_filters).pack(side='left',padx=5)
         main=ttk.Frame(self); main.pack(fill='both',expand=True,padx=12,pady=(0,8))
         sidebar=ttk.Frame(main,width=175,padding=(0,12,10,0)); sidebar.pack(side='left',fill='y');sidebar.pack_propagate(False)
         ttk.Label(sidebar,text='FOLDERS',font=('Segoe UI',10,'bold')).pack(anchor='w',padx=10,pady=(0,10))
@@ -97,6 +130,63 @@ class UiMixin:
         self.bar=ttk.Progressbar(self,mode='determinate',maximum=100);self.bar.pack(fill='x',padx=12)
         ttk.Label(self,textvariable=self.status,anchor='w',padding=(12,6)).pack(fill='x')
 
+    def clear_filters(self):
+        """Clear recipient and date filters."""
+        self.sender_filter.set('')
+        self.recipient_filter.set('')
+        self.start_date_filter.set('')
+        self.end_date_filter.set('')
+        self.refresh(reset=True)
+
+    def schedule_address_suggestions(self, field):
+        """Debounce address suggestions to avoid blocking while typing."""
+        if self.suggestion_timer is not None:
+            self.after_cancel(self.suggestion_timer)
+        self.suggestion_timer=self.after(250,lambda:self._queue_address_suggestions(field))
+
+    def _queue_address_suggestions(self, field):
+        self.suggestion_timer=None
+        if not self.db or not self.conn:return
+        self.suggestion_request+=1
+        value=(self.sender_filter if field=='sender' else self.recipient_filter).get().strip()
+        if not value:
+            self.address_boxes[field]['values']=[]
+            return
+        self.events.put(('suggestions_requested',self.generation,(self.suggestion_request,field,value,str(self.db))))
+        # Run the potentially expensive address scan outside Tk's event loop.
+        threading.Thread(target=self._address_suggestion_worker,
+                         args=(self.generation,self.suggestion_request,field,value,str(self.db)),
+                         daemon=True).start()
+
+    def _address_suggestion_worker(self,generation,request_id,field,value,db):
+        """Return distinct sender or recipient email addresses matching input."""
+        connection=None
+        try:
+            connection=sqlite3.connect(Path(db).resolve().as_uri()+'?mode=ro',uri=True,timeout=5)
+            column='sender' if field=='sender' else 'recipient'
+            # Limit candidates so large archives don't stall the dropdown.
+            rows=connection.execute(
+                f'SELECT DISTINCT {column} FROM messages WHERE {column} LIKE ? LIMIT 1200',
+                ('%'+value+'%',)).fetchall()
+            matches=set()
+            for (header,) in rows:
+                for _,address in getaddresses([header or '']):
+                    if value.casefold() in address.casefold():
+                        matches.add(address)
+            suggestions=sorted(matches,key=lambda x:(not x.lower().startswith(value.lower()),x.lower()))[:40]
+            self.events.put(('address_suggestions',generation,(request_id,field,value,suggestions)))
+        except sqlite3.Error:
+            pass
+        finally:
+            if connection:connection.close()
+
+    def display_address_suggestions(self,data):
+        request_id,field,value,suggestions=data
+        widget=self.address_boxes[field]
+        variable=self.sender_filter if field=='sender' else self.recipient_filter
+        if request_id!=self.suggestion_request or variable.get().strip()!=value:return
+        widget['values']=suggestions
+
     def select_all_page(self,event=None):
         self.tree.selection_set(self.tree.get_children())
         return 'break'
@@ -137,6 +227,18 @@ class UiMixin:
         if self.search_timer is not None:
             self.after_cancel(self.search_timer)
         self.status.set("Searching messages…")
+        from datetime import date
+        try:
+            for value in (self.start_date_filter.get().strip(),self.end_date_filter.get().strip()):
+                if value and date.fromisoformat(value).isoformat()!=value:
+                    raise ValueError
+        except ValueError:
+            self.status.set('Use YYYY-MM-DD for dates.')
+            return
+        if (self.start_date_filter.get().strip() and self.end_date_filter.get().strip()
+                and self.start_date_filter.get().strip()>self.end_date_filter.get().strip()):
+            self.status.set('Start date must be before end date.')
+            return
         self.search_timer = self.after(
             120, lambda: self._queue_search(request_id)
         )
@@ -148,7 +250,9 @@ class UiMixin:
             return
         request = (
             self.generation, request_id, str(self.db),
-            self.search.get().strip(), self.folder, self.offset
+            self.search.get().strip(), self.folder, self.offset,
+            self.sender_filter.get().strip(), self.recipient_filter.get().strip(), self.start_date_filter.get().strip(),
+            self.end_date_filter.get().strip(), self.attachments_only.get()
         )
         # Queue size one: replace obsolete pending searches with the newest.
         try:
@@ -161,7 +265,7 @@ class UiMixin:
             self.search_jobs.put_nowait(request)
 
     @staticmethod
-    def _search_rows(db, query, folder, offset):
+    def _search_rows(db, query, folder, offset, sender='', recipient='', start_date='', end_date='', attachments_only=False):
         """Query a single page using a connection owned by the worker thread."""
         conditions = []
         args = []
@@ -178,7 +282,7 @@ class UiMixin:
                         conditions.append('m.subject LIKE ?')
                         args.append('%' + value + '%')
                     elif field == 'to':
-                        conditions.append('EXISTS (SELECT 1 FROM extra e WHERE e.start=m.start AND e.recipient LIKE ?)')
+                        conditions.append('m.recipient LIKE ?')
                         args.append('%' + value + '%')
                     elif field == 'after':
                         conditions.append('m.date >= ?')
@@ -204,6 +308,22 @@ class UiMixin:
                 'EXISTS (SELECT 1 FROM body_fts bf WHERE bf.start=m.start AND bf.body LIKE ?)'
             ]) + ')')
             args.extend(['%' + token + '%'] * 4)
+        if sender:
+            conditions.append('m.sender LIKE ?')
+            args.append('%'+sender+'%')
+        if recipient:
+            conditions.append('m.recipient LIKE ?')
+            args.append('%'+recipient+'%')
+        if start_date:
+            conditions.append('m.date >= ?')
+            args.append(start_date)
+        if end_date:
+            from datetime import date, timedelta
+            conditions.append('m.date < ?')
+            args.append((date.fromisoformat(end_date)+timedelta(days=1)).isoformat())
+        if attachments_only:
+            # Attachment metadata is populated by the optional content index.
+            conditions.append('EXISTS (SELECT 1 FROM attachments a WHERE a.start=m.start)')
         if folder.startswith('Label: '):
             conditions.append('EXISTS (SELECT 1 FROM message_labels ml WHERE ml.start=m.start AND ml.label=?)')
             args.append(folder[7:])
@@ -237,9 +357,9 @@ class UiMixin:
     def _search_worker(self):
         """Execute database searches away from the Tkinter main thread."""
         while True:
-            generation, request_id, db, query, folder, offset = self.search_jobs.get()
+            generation, request_id, db, query, folder, offset, sender, recipient, start_date, end_date, attachments_only = self.search_jobs.get()
             try:
-                result = self._search_rows(db, query, folder, offset)
+                result = self._search_rows(db, query, folder, offset, sender, recipient, start_date, end_date, attachments_only)
                 self.events.put(('search_result', generation, (request_id, result)))
             except sqlite3.Error as exc:
                 self.events.put(('search_error', generation, (request_id, str(exc))))
@@ -266,6 +386,9 @@ class UiMixin:
             state='normal' if offset + PAGE_SIZE < total else 'disabled'
         )
         self.status.set(f'{total:,} matching messages.')
+        # Keep an already-open attachment browser in sync with the visible page.
+        if self.attachment_window and self.attachment_window.winfo_exists():
+            self.populate_attachments()
 
     def change_page(self,delta):self.offset=max(0,self.offset+delta*PAGE_SIZE);self.refresh()
 
@@ -315,6 +438,12 @@ class UiMixin:
                 source.seek(start)
                 msg=email.message_from_bytes(source.read(stop-start),policy=policy.default)
                 full=body_text(msg).strip()
+                # HTML-only messages need their link destinations preserved.
+                has_plain=any(p.get_content_type()=='text/plain' and
+                              p.get_content_disposition()!='attachment'
+                              for p in msg.walk())
+                if not has_plain:
+                    full=html_text(msg) or full
                 short,has_quote=self.clean_reply(full)
                 card=ttk.LabelFrame(self.thread_content,
                     text=f'{decoded(msg.get("From"))}  ·  {date_string(msg.get("Date"))}',
@@ -340,7 +469,7 @@ class UiMixin:
                     if not expanded[0]:
                         content=short[:180]+('…' if len(short)>180 else '')
                     body.configure(state='normal')
-                    body.delete('1.0','end');body.insert('1.0',content)
+                    body.delete('1.0','end');insert_links(body,content)
                     body.configure(height=min(28,max(2,content.count('\\n')+1,len(content)//75+1)),
                                    state='disabled')
                     toggle.configure(text='Collapse' if expanded[0] else 'Expand')
@@ -355,6 +484,7 @@ class UiMixin:
                     quote_ref[0]=ttk.Button(actions,command=toggle_quote)
                     quote_ref[0].pack(side='left',padx=8)
                 render()
+                self.show_inline_images(card,msg)
         self.thread_canvas.yview_moveto(0)
 
     def destroy(self):
